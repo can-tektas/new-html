@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Rota Haritası</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+    #map { height: 100vh; width: 100%; }
+    .loading { 
+      position: absolute; 
+      top: 50%; 
+      left: 50%; 
+      transform: translate(-50%, -50%);
+      background: white;
+      padding: 20px;
+      border-radius: 5px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      z-index: 1000;
+    }
+    .error-message {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: #ffebee;
+      color: #c62828;
+      padding: 10px;
+      border-radius: 5px;
+      z-index: 1000;
+      max-width: 80%;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="loading" class="loading">The route is being plotted...</div>
+  <div id="error-message" class="error-message" style="display: none;"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // URL parametrelerini al
+    const params = new URLSearchParams(window.location.search);
+    const userLat = parseFloat(params.get("userLat"));
+    const userLon = parseFloat(params.get("userLon"));
+    const stationLat = parseFloat(params.get("stationLat"));
+    const stationLon = parseFloat(params.get("stationLon"));
+    const stationName = decodeURIComponent(params.get("stationName"));
+    const API_KEY = '5b3ce3597851110001cf6248131fee57310748b9a61e299dcee2bc23';
+
+    // Starting the map
+    const map = L.map('map').setView([userLat, userLon], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Start and end markers
+    const userMarker = L.marker([userLat, userLon]).addTo(map)
+      .bindPopup("<b>Starting Location</b>")
+      .openPopup();
+    
+    const stationMarker = L.marker([stationLat, stationLon]).addTo(map)
+      .bindPopup(`<b>${stationName}</b>`);
+
+    // Show error message
+    function showError(message) {
+      const errorDiv = document.getElementById('error-message');
+      errorDiv.textContent = message;
+      errorDiv.style.display = 'block';
+    }
+
+    // Route drawing process (with GET request)
+    function drawRoute() {
+      const url = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=${API_KEY}&start=${userLon},${userLat}&end=${stationLon},${stationLat}`;
+      
+      const request = new XMLHttpRequest();
+      request.open('GET', url);
+      request.setRequestHeader('Accept', 'application/json, application/geo+json');
+      
+      request.onreadystatechange = function() {
+        if (this.readyState === 4) {
+          document.getElementById('loading').style.display = 'none';
+          
+          if (this.status === 200) {
+            try {
+              const data = JSON.parse(this.responseText);
+              console.log("API Yanıtı:", data);
+              
+              // Supporting different response formats
+              let coordinates;
+              if (data.routes?.[0]?.geometry?.coordinates) {
+                coordinates = data.routes[0].geometry.coordinates;
+              } else if (data.features?.[0]?.geometry?.coordinates) {
+                coordinates = data.features[0].geometry.coordinates;
+              } else {
+                throw new Error("No valid route data found");
+              }
+              
+              // Convert coordinates to [lat, lng] format
+              const routeCoords = coordinates.map(coord => [coord[1], coord[0]]);
+              
+              // Route line
+              const routeLine = L.polyline(routeCoords, {
+                color: '#e6301c',
+                weight: 5,
+                opacity: 0.9,
+                lineJoin: 'round'
+              }).addTo(map);
+              
+              // Adjust map to route
+              map.fitBounds(routeLine.getBounds(), { padding: [50, 50] });
+              
+            } catch (error) {
+              console.error("Data processing error:", error);
+              showError(`The route could not be drawn: ${error.message}`);
+              map.fitBounds([
+                [userLat, userLon],
+                [stationLat, stationLon]
+              ], { padding: [50, 50] });
+            }
+          } else {
+            let errorMsg = `API Error: ${this.status}`;
+            try {
+              const errorData = JSON.parse(this.responseText);
+              errorMsg += ` - ${errorData.error?.message || this.statusText}`;
+            } catch (e) {}
+            console.error(errorMsg);
+            showError(`The route could not be drawn: ${errorMsg}`);
+            map.fitBounds([
+              [userLat, userLon],
+              [stationLat, stationLon]
+            ], { padding: [50, 50] });
+          }
+        }
+      };
+      
+      request.onerror = function() {
+        document.getElementById('loading').style.display = 'none';
+        showError("A network error occurred. Please check your connection.");
+      };
+      
+      request.send();
+    }
+
+    // Sayfa yüklendiğinde rotayı çiz (500ms sonra)
+    window.onload = () => setTimeout(drawRoute, 500);
+  </script>
+</body>
+</html>
