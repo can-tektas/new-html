@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Şarj İstasyonu Bulucu</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #333; }
+        #map { height: 500px; width: 100%; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f2f2f2; }
+        tr:hover { background-color: #f9f9f9; cursor: pointer; }
+        .loading { text-align: center; padding: 20px; font-size: 18px; color: #ff5722; }
+        button {
+            background-color: #4CAF50; color: white;
+            padding: 10px 15px; border: none; border-radius: 4px;
+            cursor: pointer; font-size: 16px; margin: 20px auto;
+        }
+        button:hover { background-color: #45a049; }
+        .error { color: red; text-align: center; margin: 10px 0; }
+        .score-good { color: #4CAF50; font-weight: bold; }
+        .score-medium { color: #FFC107; font-weight: bold; }
+        .score-low { color: #F44336; font-weight: bold; }
+        .preference-container {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .preference-option {
+            padding: 10px 20px;
+            background-color: #f0f0f0;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .preference-option.selected {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .preference-option:hover {
+            background-color: #e0e0e0;
+        }
+        .preference-option.selected:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <h1>The Best Charge Stations</h1>
+    <div class="preference-container">
+        <div class="preference-option" data-preference="distance">Shortest Distance</div>
+        <div class="preference-option" data-preference="power">Highest Power</div>
+        <div class="preference-option" data-preference="price">Lowest Price</div>
+    </div>
+    <button onclick="getLocation()">Use My Location</button>
+    <div id="error" class="error"></div>
+    <div id="map"></div>
+    <div id="loading" class="loading">Getting Your Location...</div>
+    <table id="results">
+        <thead>
+            <tr>
+                <th>Station</th>
+                <th>Score</th>
+                <th>Distance (km)</th>
+                <th>Connectors</th>
+                <th>Power (kW)</th>
+                <th>Operator</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const OPENROUTE_API_KEY = "5b3ce3597851110001cf6248131fee57310748b9a61e299dcee2bc23";
+        const OPENCHARGE_API_KEY = "9315dd13-df04-41d9-9c85-d7ea59a52378";
+        let map, userMarker, userLat, userLon;
+        let chargingStations = [];
+        let userPreference = null; // Kullanıcı tercihini saklayacak
+
+        function initMap() {
+            // Haritayı varsayılan olarak dünya görünümüyle başlat
+            map = L.map('map').setView([39.9334, 32.8597], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+        }
+
+        // Tercih seçeneklerini ayarla
+        function setupPreferenceOptions() {
+            const options = document.querySelectorAll('.preference-option');
+            options.forEach(option => {
+                option.addEventListener('click', () => {
+                    options.forEach(opt => opt.classList.remove('selected'));
+                    option.classList.add('selected');
+                    userPreference = option.dataset.preference;
+                    
+                    // Eğer konum zaten alındıysa, yeni tercihe göre sonuçları yeniden hesapla
+                    if (userLat && userLon && chargingStations.length > 0) {
+                        getRecommendations(userLat, userLon);
+                    }
+                });
+            });
+        }
+
+        async function fetchChargingStations(lat, lng) {
+            try {
+                document.getElementById('loading').innerText = "Loading charging stations...";
+                
+                // Open Charge Map API'den istasyonları çek (ülke kodu kaldırıldı)
+                const response = await fetch(`https://api.openchargemap.io/v3/poi/?output=json&maxresults=50&latitude=${lat}&longitude=${lng}&distance=50&distanceunit=KM&key=${OPENCHARGE_API_KEY}`);
+                
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // İstasyon verilerini işle
+                chargingStations = data.map(station => {
+                    const connectors = station.Connections || [];
+                    const maxPower = Math.max(...connectors.map(c => c.PowerKW || 0), 0);
+                    const connectorTypes = [...new Set(connectors.map(c => c.ConnectionType?.Title || 'Unknown'))].join(', ');
+                    
+                    // Haversine formülü ile basit mesafe hesaplama (API'den önce ön sıralama için)
+                    const distanceKm = calculateHaversineDistance(
+                        lat, lng, 
+                        station.AddressInfo.Latitude, 
+                        station.AddressInfo.Longitude
+                    );
+                    
+                    // Fiyat bilgisini çek (eğer varsa)
+                    let priceInfo = "Unknown";
+                    if (connectors.length > 0 && connectors[0].Price) {
+                        priceInfo = connectors[0].Price;
+                    }
+                    
+                    // Ön puanlama (detaylı puanlama sonra yapılacak)
+                    const prelimScore = calculateScore(distanceKm, maxPower, priceInfo);
+                    
+                    return {
+                        id: station.ID,
+                        name: station.AddressInfo?.Title || "Unnamed Station",
+                        coordinates: [station.AddressInfo.Longitude, station.AddressInfo.Latitude],
+                        operator: station.OperatorInfo?.Title || "Unknown",
+                        connectors: connectorTypes,
+                        maxPower: maxPower,
+                        price: priceInfo,
+                        distance: distanceKm,
+                        prelimScore: prelimScore
+                    };
+                });
+                
+                // Ön puanlamaya göre ilk 20 istasyonu seç (API çağrılarını azaltmak için)
+                chargingStations.sort((a, b) => b.prelimScore - a.prelimScore);
+                chargingStations = chargingStations.slice(0, 20);
+                
+                if (chargingStations.length === 0) {
+                    throw new Error("No charging stations found in your area. Please try a different location.");
+                }
+                
+            } catch (error) {
+                console.error("Error fetching stations:", error);
+                showError(error.message);
+                chargingStations = [];
+            }
+        }
+
+        // Haversine formülü ile mesafe hesaplama (km cinsinden)
+        function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371; // Earth radius in km
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = 
+                Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+
+        function calculateScore(distanceKm, maxPower, priceInfo) {
+            // Normalize distance (0-10 km arasında daha hassas)
+            const normDistance = Math.min(distanceKm, 50) / 50;
+            // Normalize power (0-350 kW arası)
+            const normPower = Math.min(maxPower, 350) / 350;
+            
+            // Fiyat bilgisini normalize et (basit bir yaklaşım)
+            let normPrice = 0.5; // Varsayılan değer (bilinmiyorsa)
+            if (typeof priceInfo === 'string') {
+                // Fiyat bilgisini parse etmeye çalış (basit bir yaklaşım)
+                const priceMatch = priceInfo.match(/(\d+\.?\d*)/);
+                if (priceMatch) {
+                    const priceValue = parseFloat(priceMatch[1]);
+                    // 0-1 arasında normalize et (düşük fiyat yüksek puan)
+                    normPrice = 1 - Math.min(priceValue / 2, 1); // 2 TL/kWh üzerini 0 kabul et
+                }
+            }
+            
+            // Temel ağırlıklar (mesafe daha önemli)
+            const baseWeights = { distance: 0.5, power: 0.3, price: 0.2 };
+            
+            // Kullanıcı tercihine göre ek ağırlık ekle
+            let adjustedWeights = {...baseWeights};
+            if (userPreference) {
+                // Seçilen tercihe ek ağırlık ver (0.3 ekstra)
+                adjustedWeights[userPreference] += 0.3;
+                
+                // Diğer ağırlıkları orantılı olarak azalt
+                const otherFactors = Object.keys(baseWeights).filter(k => k !== userPreference);
+                const totalOtherWeights = otherFactors.reduce((sum, key) => sum + baseWeights[key], 0);
+                
+                otherFactors.forEach(key => {
+                    adjustedWeights[key] = baseWeights[key] * (1 - 0.3 / (totalOtherWeights + baseWeights[userPreference]));
+                });
+            }
+            
+            // Puan hesapla (0-1 arası)
+            const score = (
+                adjustedWeights.distance * (1 - normDistance) +
+                adjustedWeights.power * normPower +
+                adjustedWeights.price * normPrice
+            );
+            
+            return score;
+        }
+
+        function getScoreClass(score) {
+            if (score >= 0.7) return 'score-good';
+            if (score >= 0.4) return 'score-medium';
+            return 'score-low';
+        }
+
+        function getLocation() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('error').textContent = '';
+            
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    async (position) => {
+                        userLat = position.coords.latitude;
+                        userLon = position.coords.longitude;
+                        updateMap(userLat, userLon);
+                        
+                        // Önce istasyonları çek
+                        await fetchChargingStations(userLat, userLon);
+                        
+                        if (chargingStations.length > 0) {
+                            // Sonra detaylı önerileri al
+                            await getRecommendations(userLat, userLon);
+                        } else {
+                            document.getElementById('loading').style.display = 'none';
+                        }
+                    },
+                    (error) => {
+                        document.getElementById('loading').innerText = `Error: ${error.message}`;
+                        showError(error.message);
+                    }
+                );
+            } else {
+                document.getElementById('loading').innerText = "Geolocation is not supported by your browser";
+                showError("Geolocation is not supported by your browser");
+            }
+        }
+
+        function updateMap(lat, lng) {
+            map.setView([lat, lng], 13);
+            if (userMarker) map.removeLayer(userMarker);
+            userMarker = L.marker([lat, lng]).addTo(map)
+                .bindPopup("Your Location")
+                .openPopup();
+        }
+
+        function showError(message) {
+            document.getElementById('error').textContent = message;
+        }
+
+        async function getRecommendations(userLat, userLon) {
+            const userCoords = [userLon, userLat];
+            const headers = {
+                'Accept': 'application/json',
+                'Authorization': OPENROUTE_API_KEY,
+                'Content-Type': 'application/json'
+            };
+
+            try {
+                document.getElementById('loading').innerText = "Calculating best routes...";
+                
+                const stationScores = [];
+
+                // Tüm istasyonlar için rota ve puan hesapla
+                for (const station of chargingStations) {
+                    try {
+                        const response = await fetch('https://api.openrouteservice.org/v2/directions/driving-car', {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify({ coordinates: [userCoords, station.coordinates] })
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error(`HTTP error: ${response.status}`);
+                        }
+                        
+                        const data = await response.json();
+                        const distanceKm = data.routes[0].summary.distance / 1000;
+
+                        // Detaylı puan hesapla
+                        const score = calculateScore(distanceKm, station.maxPower, station.price);
+
+                        stationScores.push({ 
+                            ...station, 
+                            distance: distanceKm, 
+                            score: score 
+                        });
+                    } catch (error) {
+                        console.error(`Error processing station ${station.name}:`, error);
+                        // Hatalı istasyonu atla ve devam et
+                        continue;
+                    }
+                }
+
+                if (stationScores.length === 0) {
+                    throw new Error("Could not calculate routes to any stations");
+                }
+
+                // Puanlara göre sırala
+                stationScores.sort((a, b) => b.score - a.score);
+                displayResults(stationScores);
+            } catch (error) {
+                console.error("Recommendation error:", error);
+                showError(`Error: ${error.message}`);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function displayResults(stations) {
+            const tbody = document.querySelector('#results tbody');
+            tbody.innerHTML = '';
+
+            // Haritadaki tüm markerları temizle
+            map.eachLayer(layer => {
+                if (layer instanceof L.Marker && layer !== userMarker) {
+                    map.removeLayer(layer);
+                }
+            });
+
+            stations.forEach((station, index) => {
+                const row = document.createElement('tr');
+                if (index === 0) row.style.backgroundColor = '#e8f5e9';
+                
+                const scoreClass = getScoreClass(station.score);
+                
+                row.innerHTML = `
+                    <td>${station.name}</td>
+                    <td class="${scoreClass}">${station.score.toFixed(4)}</td>
+                    <td>${station.distance.toFixed(2)}</td>
+                    <td>${station.connectors}</td>
+                    <td>${station.maxPower}</td>
+                    <td>${station.operator}</td>
+                `;
+                
+                row.addEventListener('click', () => {
+                    const params = new URLSearchParams({
+                        userLat, userLon,
+                        stationLat: station.coordinates[1],
+                        stationLon: station.coordinates[0],
+                        stationName: station.name
+                    });
+                    window.open(`route.html?${params.toString()}`, '_blank');
+                });
+                
+                tbody.appendChild(row);
+                
+                // Haritada istasyon marker'ını ekle
+                const marker = L.marker([station.coordinates[1], station.coordinates[0]])
+                    .addTo(map)
+                    .bindPopup(`
+                        <b>${station.name}</b><br>
+                        Operator: ${station.operator}<br>
+                        Power: ${station.maxPower} kW<br>
+                        ${station.price !== "Unknown" ? `Price: ${station.price}<br>` : ''}
+                        Connectors: ${station.connectors}<br>
+                        Distance: ${station.distance.toFixed(2)} km<br>
+                        Score: <span class="${scoreClass}">${station.score.toFixed(4)}</span>
+                    `);
+                
+                // En iyi istasyonun marker rengini değiştir
+                if (index === 0) {
+                    marker.setIcon(L.icon({
+                        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png',
+                        iconSize: [25, 41],
+                        iconAnchor: [12, 41],
+                        popupAnchor: [1, -34],
+                    }));
+                }
+            });
+
+            // Tüm istasyonları içeren bounds ayarla
+            if (stations.length > 0) {
+                const bounds = L.latLngBounds(
+                    stations.map(station => [station.coordinates[1], station.coordinates[0]])
+                );
+                bounds.extend([userLat, userLon]);
+                map.fitBounds(bounds, { padding: [50, 50] });
+            }
+        }
+
+        window.onload = function() {
+            initMap();
+            setupPreferenceOptions();
+        };
+    </script>
+</body>
+</html>
